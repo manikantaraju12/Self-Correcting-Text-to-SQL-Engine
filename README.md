@@ -1,22 +1,112 @@
 # Self-Correcting Text-to-SQL Engine
 
-A small, runnable Text-to-SQL service that treats SQL generation as a guarded execution loop: parse the candidate AST, execute only a single read-only `SELECT`, classify failures, and feed typed execution feedback into up to two repairs. Semantic checks catch suspiciously large results and unexpected empty entity queries.
+A simple Text-to-SQL service that converts natural language questions into SQL queries, executes them safely, detects errors, and automatically attempts to correct incorrect queries.
+
+The system uses a controlled execution loop with SQL validation, error classification, and limited query repairs.
+
+## Features
+
+- Converts natural language questions into SQL.
+- Allows only safe, read-only `SELECT` queries.
+- Validates SQL using an AST-based guardrail.
+- Detects syntax, schema, and semantic errors.
+- Automatically repairs incorrect SQL queries.
+- Supports up to **3 attempts** for each question.
+- Uses PostgreSQL with Docker.
+- Provides a FastAPI REST API.
+- Includes an evaluation dataset and test suite.
+- Supports an optional OpenAI-compatible LLM.
+
+## Tech Stack
+
+- **Python 3.10+**
+- **FastAPI**
+- **SQLAlchemy**
+- **PostgreSQL**
+- **SQLite** for local testing
+- **SQLGlot** for SQL parsing and validation
+- **Docker & Docker Compose**
+- **Pytest**
+
+## How It Works
+
+```text
+User Question
+      ↓
+SQL Generator
+      ↓
+SQL Validation
+      ↓
+Safe SELECT Query
+      ↓
+Database Execution
+      ↓
+Check Result
+      ↓
+Error Feedback → SQL Repair
+```
+
+The system generates a SQL query, validates it, and executes it only if it satisfies the safety rules. If an error occurs, the system identifies the error type and sends feedback to the SQL generator for correction.
+
+## Database
+
+The PostgreSQL database contains:
+
+- `customers` – 150 records
+- `orders` – 750 records
+- `line_items` – 1,500 records
+
+The database is initialized using:
+
+```text
+sql/init.sql
+```
+
+The schema is intentionally designed with some differences between tables. For example, `customers` uses `customer_id`, while `orders` references customers using `cust_id`.
 
 ## Run with Docker
 
-Copy `.env.example` to `.env` and adjust credentials if needed, then run:
+Copy the environment file:
+
+```powershell
+copy .env.example .env
+```
+
+Then start the application:
 
 ```powershell
 docker compose up --build -d
 ```
 
-PostgreSQL initializes `customers` (150 rows), `orders` (750 rows), and `line_items` (1,500 rows) from `sql/init.sql`. Compose waits for PostgreSQL's health check before starting the API. Visit `http://localhost:8000/docs` or check `http://localhost:8000/health`.
+After the containers start, open:
 
-The schema is intentionally imperfect for learning and evaluation: customers use `customer_id`, orders reference them through `cust_id`, customer regions can be `NULL`, orders store denormalized totals, and line items contain quantity and unit-price details. When reasoning about spend, choose the requested grain to avoid counting an order total once per line item.
+```text
+http://localhost:8000/docs
+```
+
+API health check:
+
+```text
+http://localhost:8000/health
+```
 
 ## Query API
 
-`POST /api/query` accepts `{"question":"Show me all customers in New York"}` and returns:
+Send a POST request to:
+
+```text
+POST /api/query
+```
+
+Example request:
+
+```json
+{
+  "question": "Show me all customers in New York"
+}
+```
+
+Example response:
 
 ```json
 {
@@ -28,40 +118,155 @@ The schema is intentionally imperfect for learning and evaluation: customers use
 }
 ```
 
-The response's `results` depend on the seeded database. History failures are typed as `syntax` (AST guardrail or parse), `schema` (database execution), or `semantic` (heuristic). Unsafe statements are rejected before database execution. The loop is clamped to at most three attempts.
+The actual results depend on the database records.
 
-## SQL generator configuration
+## Error Handling
 
-Without an API key, a deterministic built-in generator supports the documented examples, local tests, and evaluation corpus. Set `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL` to enable an OpenAI-compatible chat completions provider. The prompt supplies the schema and the previous SQL plus typed error feedback on repair attempts. Do not commit `.env` or real credentials.
+The system classifies failures into three types:
 
-## Local development
+- **Syntax** – Invalid SQL or failed SQL parsing.
+- **Schema** – Invalid tables, columns, or database execution errors.
+- **Semantic** – Results that appear suspicious or do not match expected behavior.
 
-Python 3.10+ is required.
+Unsafe SQL statements are rejected before they reach the database.
+
+The system allows a maximum of **3 attempts** to generate and repair a query.
+
+## LLM Configuration
+
+The project includes a built-in deterministic SQL generator, so it can run without an API key.
+
+For an OpenAI-compatible LLM provider, configure:
+
+```text
+LLM_API_KEY=your_api_key
+LLM_BASE_URL=your_base_url
+LLM_MODEL=your_model
+```
+
+Do not commit `.env` files or real API credentials to GitHub.
+
+## Local Development
+
+Create a virtual environment:
 
 ```powershell
 python -m venv .venv
+```
+
+Activate it:
+
+```powershell
 .\.venv\Scripts\Activate.ps1
+```
+
+Install dependencies:
+
+```powershell
 pip install -r requirements.txt
+```
+
+Set up the local SQLite database:
+
+```powershell
 $env:DATABASE_URL = "sqlite+pysqlite:///./local.db"
+```
+
+```powershell
 python -c "from app.database import make_engine, seed_sqlite; seed_sqlite(make_engine('sqlite+pysqlite:///./local.db'))"
+```
+
+Start the application:
+
+```powershell
 python -m uvicorn app.main:app --reload
 ```
 
-For tests and evaluation, no external database is needed:
+## Testing
+
+Run the test suite:
 
 ```powershell
 pytest -q
+```
+
+Run the evaluation:
+
+```powershell
 python scripts/evaluate.py
 ```
 
-The evaluator runs zero-shot, syntax/schema-repair-only, and full-pipeline configurations against `data/eval_set.json`, then writes `results/evaluation_metrics.json`. Accuracy is exact ordered-row equality against each gold query on the reproducibly seeded SQLite fixture; iteration count is the mean over questions.
+The evaluator tests different configurations and stores the evaluation results in:
+
+```text
+results/evaluation_metrics.json
+```
+
+Accuracy is measured by comparing the generated results with the expected results from the evaluation dataset.
+
+## Project Structure
+
+```text
+Self-Correcting-Text-to-SQL-Engine/
+│
+├── app/
+│   ├── generator.py
+│   ├── guardrails.py
+│   ├── service.py
+│   └── main.py
+│
+├── data/
+│   └── eval_set.json
+│
+├── sql/
+│   └── init.sql
+│
+├── scripts/
+│   └── evaluate.py
+│
+├── results/
+│   └── evaluation_metrics.json
+│
+├── tests/
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+└── README.md
+```
 
 ## Architecture
 
 ```text
-Question -> SQL generator -> sqlglot single-SELECT guard -> SQLAlchemy execution
-    ^                                                        |
-    |---- typed syntax / schema / semantic feedback ----------|
+                    ┌─────────────────┐
+                    │  User Question  │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ SQL Generator   │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ SQL Guardrails  │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ Database        │
+                    │ Execution       │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ Error / Result  │
+                    └────────┬────────┘
+                             ↓
+                    ┌─────────────────┐
+                    │ Repair Feedback │
+                    └────────┬────────┘
+                             │
+                             └──→ SQL Generator
 ```
 
-`app/generator.py` owns generation, `app/guardrails.py` owns AST policy, and `app/service.py` owns execution feedback, heuristics, and the hard attempt limit. `sql/init.sql` is the canonical PostgreSQL fixture.
+## Conclusion
+
+The **Self-Correcting Text-to-SQL Engine** provides a safe and reliable approach to converting natural language into SQL. Instead of simply generating a query and executing it, the system validates the SQL, detects failures, provides meaningful feedback, and automatically attempts to correct the query.
+
+This project demonstrates how **LLMs, SQL validation, database execution, error handling, and automated self-correction** can be combined to build a practical and safer Text-to-SQL system.
